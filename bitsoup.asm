@@ -1,6 +1,9 @@
 AF_INET equ 2
 SOCK_STREAM equ 1
 IPPROTO_TCP equ 6
+SOL_SOCKET equ 0FFFFh
+SO_RCVTIMEO equ 1006h
+WSAETIMEDOUT equ 10060
 STD_OUTPUT_HANDLE equ -11
 INVALID_SOCKET equ -1
 SOCKET_ERROR equ -1
@@ -13,6 +16,8 @@ extrn listen:proc
 extrn accept:proc
 extrn recv:proc
 extrn send:proc
+extrn setsockopt:proc
+extrn WSAGetLastError:proc
 extrn closesocket:proc
 
 extrn GetStdHandle:proc
@@ -60,6 +65,7 @@ listen_socket dq 0
 client_socket dq 0
 written dd 0
 last_recv dd 0
+receive_timeout dd 1000
 frame_bytes dd 0
 frame_len dd 0
 frame_compressed dd 0
@@ -98,9 +104,9 @@ token_answer_packet db 00h, 00h, 00h, 15h
     db "bitsoup-token"
 
 ; server identification. the client needs this before it will believe any of us
-; the lonely zero at the end is an empty config tree. null was apparently too rude
-server_identification_packet db 00h, 00h, 00h, 4Eh
-    db 0Ah, 4Ch
+; allowMap is false until we have something less insulting than no map server
+server_identification_packet db 00h, 00h, 00h, 59h
+    db 0Ah, 57h
     db 0Ah, 06h, "1.22.6"
     db 8Ah, 01h, 06h, "1.22.4"
     db 1Ah, 07h, "BitSoup"
@@ -112,18 +118,36 @@ server_identification_packet db 00h, 00h, 00h, 4Eh
     db 0B8h, 01h, 10h
     db 68h, 01h
     db 82h, 01h, 08h, "survival"
+    db 0A2h, 01h, 0Ch, 09h, 08h, "allowMap", 00h, 00h
     db 0C2h, 01h, 0Ch, "bitsoup-save"
-    db 0A2h, 01h, 01h, 00h
 
 ; id 73 means ServerReady. yes the empty packet matters
 server_ready_packet db 00h, 00h, 00h, 06h
     db 0D0h, 05h, 49h
     db 0CAh, 04h, 00h
 
-; id 56 is the network channel list. ours is empty for now
-network_channels_packet db 00h, 00h, 00h, 06h
-    db 0D0h, 05h, 38h
-    db 0C2h, 03h, 00h
+; id 56 connects the two mod channels we can currently fake with a straight face
+network_channels_packet db 00h, 00h, 00h, 22h, 0D0h, 05h, 38h, 0C2h, 03h, 1Ch
+    db 08h, 01h, 08h, 02h
+    db 12h, 07h, "weather"
+    db 12h, 0Dh, "charselection"
+
+; id 51 gives the coordinate HUD a real global spawn instead of a null pointer
+; positions use blocks times 16384 because normal numbers were too approachable
+spawn_position_packet db 00h, 00h, 00h, 19h, 0D0h, 05h, 33h, 9Ah, 03h, 13h, 08h, 01h
+    db 10h, 80h, 80h, 80h, 04h, 18h, 80h, 80h, 70h, 20h, 80h, 80h
+    db 80h, 04h, 92h, 01h, 00h
+
+; id 2 is the whole keepalive packet. the nested ping contains absolutely nothing
+ping_packet db 00h, 00h, 00h, 06h, 0D0h, 05h, 02h, 82h, 01h, 00h
+
+; tell survival that the default character is already picked
+; otherwise it opens a dress-up screen for the player model we do not have yet
+character_selected_packet db 00h, 00h, 00h, 0Eh, 0D0h, 05h, 37h, 0BAh, 03h, 08h, 08h, 02h
+    db 10h, 01h, 1Ah, 02h, 08h, 01h
+
+; its just too large to fit here, cant i have SOME space
+include weather-packet.inc
 
 ; id 4 sets 32 block chunks, 512 block regions, and a 128 block view distance
 ; yes the client divides by this stuff later. 16 looked innocent and absolutely was not
@@ -145,9 +169,9 @@ level_progress_packet db 00h, 00h, 00h, 1Ch
 
 ; id 21 carries world config and the light lookup tables
 ; yes even a world made entirely of air needs 64 tiny brightness numbers
-world_metadata_packet db 00h, 00h, 00h, 8Eh
+world_metadata_packet db 00h, 00h, 00h, 99h
     db 0D0h, 05h, 15h
-    db 0AAh, 01h, 87h, 01h
+    db 0AAh, 01h, 92h, 01h
     db 08h, 18h
 
     db 10h, 03h, 10h, 06h, 10h, 09h, 10h, 0Bh
@@ -168,39 +192,10 @@ world_metadata_packet db 00h, 00h, 00h, 8Eh
     db 18h, 40h, 18h, 40h, 18h, 40h, 18h, 40h
     db 18h, 40h, 18h, 40h, 18h, 40h, 18h, 40h
 
-    db 22h, 01h, 00h
+    db 22h, 0Ch, 09h, 08h, "allowMap", 00h, 00h
     db 28h, 6Eh
 
-; id 19 now has air and one honest to god granite block
-; the shape and texture names point at files the client already has installed
-; the code-less item marker is still here because the loading threads enjoy betrayal
-; playerinventory stops character setup from grabbing a behavior we never sent
-server_assets_packet db 00h, 00h, 01h, 32h, 0D0h, 05h, 13h, 9Ah, 01h, 0ABh, 02h, 0Ah
-    db 21h, 32h, 03h, 61h, 69h, 72h, 0A2h, 05h, 02h, 5Bh, 5Dh, 82h
-    db 01h, 07h, 67h, 65h, 6Eh, 65h, 72h, 61h, 6Ch, 0CAh, 02h, 05h
-    db 42h, 6Ch, 6Fh, 63h, 6Bh, 0B2h, 03h, 02h, 7Bh, 7Dh, 0Ah, 0A5h
-    db 01h, 0Ah, 03h, 61h, 6Ch, 6Ch, 12h, 1Bh, 0Ah, 19h, 62h, 6Ch
-    db 6Fh, 63h, 6Bh, 2Fh, 73h, 74h, 6Fh, 6Eh, 65h, 2Fh, 72h, 6Fh
-    db 63h, 6Bh, 2Fh, 67h, 72h, 61h, 6Eh, 69h, 74h, 65h, 31h, 28h
-    db 01h, 32h, 0Ch, 72h, 6Fh, 63h, 6Bh, 2Dh, 67h, 72h, 61h, 6Eh
-    db 69h, 74h, 65h, 0A2h, 05h, 02h, 5Bh, 5Dh, 48h, 0Ah, 50h, 02h
-    db 58h, 90h, 4Eh, 82h, 01h, 07h, 67h, 65h, 6Eh, 65h, 72h, 61h
-    db 6Ch, 0F0h, 02h, 01h, 0F0h, 02h, 01h, 0F0h, 02h, 01h, 0F0h, 02h
-    db 01h, 0F0h, 02h, 01h, 0F0h, 02h, 01h, 0E8h, 01h, 20h, 0F8h, 01h
-    db 80h, 01h, 80h, 02h, 06h, 92h, 02h, 12h, 0Ah, 10h, 62h, 6Ch
-    db 6Fh, 63h, 6Bh, 2Fh, 62h, 61h, 73h, 69h, 63h, 2Fh, 63h, 75h
-    db 62h, 65h, 0B0h, 02h, 01h, 0BAh, 02h, 09h, 20h, 90h, 4Eh, 28h
-    db 90h, 4Eh, 30h, 90h, 4Eh, 0C2h, 02h, 09h, 20h, 90h, 4Eh, 28h
-    db 90h, 4Eh, 30h, 90h, 4Eh, 0CAh, 02h, 05h, 42h, 6Ch, 6Fh, 63h
-    db 6Bh, 0B2h, 03h, 02h, 7Bh, 7Dh, 0A0h, 04h, 90h, 4Eh, 12h, 03h
-    db 08h, 0FFh, 7Fh, 1Ah, 59h, 0Ah, 06h, 70h, 6Ch, 61h, 79h, 65h
-    db 72h, 12h, 0Ch, 45h, 6Eh, 74h, 69h, 74h, 79h, 50h, 6Ch, 61h
-    db 79h, 65h, 72h, 0CAh, 01h, 04h, 00h, 00h, 00h, 00h
-    db 2Ah, 1Ch, 12h, 1Ah, 7Bh, 22h, 63h, 6Fh, 64h, 65h, 22h, 3Ah
-    db 22h, 70h, 6Ch, 61h, 79h, 65h, 72h, 69h, 6Eh, 76h, 65h, 6Eh
-    db 74h, 6Fh, 72h, 79h, 22h, 7Dh, 30h, 80h, 80h, 0F7h, 02h, 38h
-    db 80h, 0A0h, 84h, 09h, 42h, 02h, 7Bh, 7Dh, 78h, 80h, 08h, 80h
-    db 01h, 0CDh, 0Dh, 0A0h, 02h, 80h, 0Ch, 0E8h, 01h, 80h, 88h, 04h
+include assets-packet.inc
 
 ; id 40 spawns our one lonely EntityPlayer
 ; the stat trees keep the HUD from asking a null oxygen bar to hide itself
@@ -273,18 +268,8 @@ playerdata_uid_patch db "000000000000000000000000"
     db 80h, 04h, 0A2h, 01h, 08h, 73h, 75h, 70h, 6Ch, 61h, 79h, 65h
     db 72h
 
-; id 10 sends chunk 16,3,16 with a granite floor at local y 15
-; those ugly bytes are zstd compressed block and full-sunlight bit planes x d
-spawn_chunk_packet db 00h, 00h, 00h, 6Fh, 0D0h, 05h, 0Ah, 4Ah, 6Ah, 0Ah, 68h, 0Ah
-    db 2Ch, 0F8h, 0FFh, 0FFh, 0FFh, 00h, 00h, 00h, 00h, 01h, 00h, 00h
-    db 00h, 28h, 0B5h, 2Fh, 0FDh, 60h, 00h, 0Fh, 0B5h, 00h, 00h, 50h
-    db 00h, 00h, 00h, 00h, 0FFh, 0FFh, 0FFh, 00h, 00h, 00h, 03h, 10h
-    db 00h, 0FAh, 0FFh, 43h, 0A7h, 23h, 0EFh, 9Fh, 08h, 12h, 15h, 28h
-    db 0B5h, 2Fh, 0FDh, 60h, 00h, 0Fh, 5Dh, 00h, 00h, 20h, 0FFh, 0FFh
-    db 0FFh, 0FFh, 01h, 00h, 0F9h, 0F7h, 01h, 11h, 1Ah, 11h, 28h, 0B5h
-    db 2Fh, 0FDh, 20h, 08h, 41h, 00h, 00h, 00h, 00h, 00h, 00h, 1Fh
-    db 00h, 00h, 00h, 7Ah, 04h, 00h, 00h, 00h, 00h, 20h, 10h, 28h
-    db 03h, 30h, 10h, 52h, 00h, 70h, 02h
+; id 10 sends the platform chunk and enough empty neighbors to let it mesh
+include chunk-packet.inc
 
 ; id 53 picks hotbar slot zero. there is nothing in it
 selected_hotbar_packet db 00h, 00h, 00h, 08h, 0D0h, 05h, 35h, 0AAh, 03h, 02h, 10h, 01h
@@ -622,7 +607,7 @@ send_server_identification proc
 
     mov rcx, client_socket
     lea rdx, server_identification_packet
-    mov r8d, 82
+    mov r8d, 93
     xor r9d, r9d
     call send
 
@@ -648,13 +633,65 @@ send_network_channels proc
 
     mov rcx, client_socket
     lea rdx, network_channels_packet
-    mov r8d, 10
+    mov r8d, 38
     xor r9d, r9d
     call send
 
     add rsp, 40
     ret
 send_network_channels endp
+
+send_spawn_position proc
+    sub rsp, 40
+
+    mov rcx, client_socket
+    lea rdx, spawn_position_packet
+    mov r8d, 29
+    xor r9d, r9d
+    call send
+
+    add rsp, 40
+    ret
+send_spawn_position endp
+
+send_ping proc
+    sub rsp, 40
+
+    mov rcx, client_socket
+    lea rdx, ping_packet
+    mov r8d, 10
+    xor r9d, r9d
+    call send
+
+    add rsp, 40
+    ret
+send_ping endp
+
+send_character_selected proc
+    sub rsp, 40
+
+    mov rcx, client_socket
+    lea rdx, character_selected_packet
+    mov r8d, 18
+    xor r9d, r9d
+    call send
+
+    add rsp, 40
+    ret
+send_character_selected endp
+
+send_weather_assets proc
+    sub rsp, 40
+
+    mov rcx, client_socket
+    lea rdx, weather_assets_packet
+    mov r8d, 4464
+    xor r9d, r9d
+    call send
+
+    add rsp, 40
+    ret
+send_weather_assets endp
 
 send_level_initialize proc
     sub rsp, 40
@@ -687,7 +724,7 @@ send_world_metadata proc
 
     mov rcx, client_socket
     lea rdx, world_metadata_packet
-    mov r8d, 146
+    mov r8d, 157
     xor r9d, r9d
     call send
 
@@ -700,7 +737,7 @@ send_server_assets proc
 
     mov rcx, client_socket
     lea rdx, server_assets_packet
-    mov r8d, 310
+    mov r8d, server_assets_packet_size
     xor r9d, r9d
     call send
 
@@ -739,7 +776,7 @@ send_spawn_chunk proc
 
     mov rcx, client_socket
     lea rdx, spawn_chunk_packet
-    mov r8d, 115
+    mov r8d, spawn_chunk_packet_size
     xor r9d, r9d
     call send
 
@@ -1057,12 +1094,15 @@ parse_client_id_request_join:
     call printz
     call patch_uid_placeholders
     call send_network_channels
+    call send_spawn_position
     call send_level_initialize
     call send_level_progress
     call send_world_metadata
     call send_server_assets
     call send_entities
+    call send_character_selected
     call send_player_data
+    call send_weather_assets
     call send_selected_hotbar
     call send_level_finalize
     lea rcx, join_ready_msg
@@ -1107,7 +1147,7 @@ parse_client_packet endp
 
 main proc
     and rsp, -16
-    sub rsp, 32
+    sub rsp, 48
 
     mov ecx, STD_OUTPUT_HANDLE
     call GetStdHandle
@@ -1163,6 +1203,15 @@ accept_loop:
     cmp rax, INVALID_SOCKET
     je accept_loop
     mov client_socket, rax
+
+    ; waking recv once a second is our tiny excuse for having a game loop
+    mov rcx, client_socket
+    mov edx, SOL_SOCKET
+    mov r8d, SO_RCVTIMEO
+    lea r9, receive_timeout
+    mov dword ptr [rsp + 32], 4
+    call setsockopt
+
     call clear_frame
     call clear_identity
 
@@ -1173,7 +1222,16 @@ recv_loop:
     xor r9d, r9d
     call recv
     cmp eax, 0
-    jle client_closed
+    jg recv_got_bytes
+    je client_closed
+
+    call WSAGetLastError
+    cmp eax, WSAETIMEDOUT
+    jne client_closed
+    call send_ping
+    jmp recv_loop
+
+recv_got_bytes:
     mov last_recv, eax
 
     call append_recv
