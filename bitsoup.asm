@@ -174,7 +174,8 @@ world_metadata_packet db 00h, 00h, 00h, 8Eh
 ; id 19 now has air and one honest to god granite block
 ; the shape and texture names point at files the client already has installed
 ; the code-less item marker is still here because the loading threads enjoy betrayal
-server_assets_packet db 00h, 00h, 01h, 14h, 0D0h, 05h, 13h, 9Ah, 01h, 8Dh, 02h, 0Ah
+; playerinventory stops character setup from grabbing a behavior we never sent
+server_assets_packet db 00h, 00h, 01h, 32h, 0D0h, 05h, 13h, 9Ah, 01h, 0ABh, 02h, 0Ah
     db 21h, 32h, 03h, 61h, 69h, 72h, 0A2h, 05h, 02h, 5Bh, 5Dh, 82h
     db 01h, 07h, 67h, 65h, 6Eh, 65h, 72h, 61h, 6Ch, 0CAh, 02h, 05h
     db 42h, 6Ch, 6Fh, 63h, 6Bh, 0B2h, 03h, 02h, 7Bh, 7Dh, 0Ah, 0A5h
@@ -192,12 +193,14 @@ server_assets_packet db 00h, 00h, 01h, 14h, 0D0h, 05h, 13h, 9Ah, 01h, 8Dh, 02h, 
     db 90h, 4Eh, 30h, 90h, 4Eh, 0C2h, 02h, 09h, 20h, 90h, 4Eh, 28h
     db 90h, 4Eh, 30h, 90h, 4Eh, 0CAh, 02h, 05h, 42h, 6Ch, 6Fh, 63h
     db 6Bh, 0B2h, 03h, 02h, 7Bh, 7Dh, 0A0h, 04h, 90h, 4Eh, 12h, 03h
-    db 08h, 0FFh, 7Fh, 1Ah, 3Bh, 0Ah, 06h, 70h, 6Ch, 61h, 79h, 65h
+    db 08h, 0FFh, 7Fh, 1Ah, 59h, 0Ah, 06h, 70h, 6Ch, 61h, 79h, 65h
     db 72h, 12h, 0Ch, 45h, 6Eh, 74h, 69h, 74h, 79h, 50h, 6Ch, 61h
-    db 79h, 65h, 72h, 0CAh, 01h, 04h, 00h, 00h, 00h, 00h, 30h, 80h
-    db 80h, 0F7h, 02h, 38h, 80h, 0A0h, 84h, 09h, 42h, 02h, 7Bh, 7Dh
-    db 78h, 80h, 08h, 80h, 01h, 0CDh, 0Dh, 0A0h, 02h, 80h, 0Ch, 0E8h
-    db 01h, 80h, 88h, 04h
+    db 79h, 65h, 72h, 0CAh, 01h, 04h, 00h, 00h, 00h, 00h
+    db 2Ah, 1Ch, 12h, 1Ah, 7Bh, 22h, 63h, 6Fh, 64h, 65h, 22h, 3Ah
+    db 22h, 70h, 6Ch, 61h, 79h, 65h, 72h, 69h, 6Eh, 76h, 65h, 6Eh
+    db 74h, 6Fh, 72h, 79h, 22h, 7Dh, 30h, 80h, 80h, 0F7h, 02h, 38h
+    db 80h, 0A0h, 84h, 09h, 42h, 02h, 7Bh, 7Dh, 78h, 80h, 08h, 80h
+    db 01h, 0CDh, 0Dh, 0A0h, 02h, 80h, 0Ch, 0E8h, 01h, 80h, 88h, 04h
 
 ; id 40 spawns our one lonely EntityPlayer
 ; the stat trees keep the HUD from asking a null oxygen bar to hide itself
@@ -245,7 +248,8 @@ entity_uid_patch equ entities_packet + 78
 ; id 41 tells the client that entity 1 is actually its own player
 ; creative flight and noclip let us move while the whole world is still air
 ; the HUD expects all seven inventories even when every slot is painfully empty
-player_data_packet db 00h, 00h, 01h, 99h, 0D0h, 05h, 29h, 0CAh, 02h, 92h, 03h
+; one boring privilege also keeps the world map from calling IndexOf on null
+player_data_packet db 00h, 00h, 01h, 0A6h, 0D0h, 05h, 29h, 0CAh, 02h, 9Fh, 03h
     db 08h, 01h, 10h, 01h, 18h, 02h, 20h, 40h, 28h, 01h, 30h, 01h
 
     db 3Ah, 2Bh, 08h, 01h, 12h, 06h, "hotbar", 1Ah, 1Fh, "hotbar-"
@@ -265,7 +269,7 @@ character_uid_patch db "000000000000000000000000"
 
     db 42h, 18h
 playerdata_uid_patch db "000000000000000000000000"
-    db 48h, 0C0h, 02h, 88h, 01h, 80h, 04h, 90h, 01h, 70h, 98h, 01h
+    db 48h, 0C0h, 02h, 62h, 0Bh, "buildblocks", 88h, 01h, 80h, 04h, 90h, 01h, 70h, 98h, 01h
     db 80h, 04h, 0A2h, 01h, 08h, 73h, 75h, 70h, 6Ch, 61h, 79h, 65h
     db 72h
 
@@ -696,7 +700,7 @@ send_server_assets proc
 
     mov rcx, client_socket
     lea rdx, server_assets_packet
-    mov r8d, 280
+    mov r8d, 310
     xor r9d, r9d
     call send
 
@@ -722,7 +726,7 @@ send_player_data proc
 
     mov rcx, client_socket
     lea rdx, player_data_packet
-    mov r8d, 413
+    mov r8d, 426
     xor r9d, r9d
     call send
 
